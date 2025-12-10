@@ -21,7 +21,8 @@ def get_stock_data_v3(stock_code):
         try:
             ticker = f"{stock_code}{suffix}"
             stock = yf.Ticker(ticker)
-            temp_df = stock.history(start="2023-01-01", auto_adjust=False)
+            # 為了確保指標(MA60)準確，我們還是抓比較長的資料(1.5年)，但畫圖時再切分
+            temp_df = stock.history(period="500d", auto_adjust=False)
             
             if not temp_df.empty:
                 df = temp_df
@@ -130,7 +131,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 4. 雙策略分析 (短線 vs 長線)
+# 4. 雙策略分析
 # ==========================================
 def analyze_signals(df):
     if len(df) < 2: return ["資料不足"]
@@ -167,95 +168,39 @@ def analyze_signals(df):
     return signals if signals else ["⚖️ 盤整中"]
 
 def generate_dual_strategy(df):
-    """
-    生成短線與長線的雙重策略
-    """
     if len(df) < 60: return None, None
-    
     last = df.iloc[-1]
     last_close = last['close']
     
-    # ---------------------------
-    # A. 短線策略 (時間約 1 個月)
-    # ---------------------------
-    # 邏輯：看月線 (MA20) + KD/RSI + 布林通道
-    short_term = {
-        "title": "中性觀望", "icon": "⚖️", "color": "gray",
-        "action": "觀望", "stop_loss": 0, "take_profit": 0, "desc": "多空不明"
-    }
-    
-    # 短線停損參考：月線 或 10日低點
+    # A. 短線
+    short_term = {"title": "中性觀望", "icon": "⚖️", "color": "gray", "action": "觀望", "stop_loss": 0, "take_profit": 0, "desc": "多空不明"}
     sl_short = last['MA20'] if 'MA20' in df.columns else last_close * 0.9
-    # 短線停利參考：布林上軌 或 10日高點
     tp_short = last['BB_Up'] if 'BB_Up' in df.columns else last_close * 1.1
 
-    # 短多判斷
     if last_close > last['MA20']:
-        short_term["title"] = "短多操作"
-        short_term["icon"] = "⚡"
-        short_term["color"] = "green"
-        short_term["action"] = "拉回佈局"
-        short_term["desc"] = "股價站上月線，短線強勢。"
-        
-        # 過熱修正
+        short_term.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", "desc": "股價站上月線，短線強勢。"})
         if 'RSI' in df.columns and last['RSI'] > 75:
-            short_term["title"] = "短線過熱"
-            short_term["icon"] = "🔥"
-            short_term["color"] = "orange"
-            short_term["action"] = "分批獲利"
-            short_term["desc"] = "RSI 過高，隨時可能回檔整理。"
-            
-    # 短空判斷
+            short_term.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", "desc": "RSI 過高，隨時可能回檔整理。"})
     elif last_close < last['MA20']:
-        short_term["title"] = "短線偏空"
-        short_term["icon"] = "📉"
-        short_term["color"] = "red"
-        short_term["action"] = "反彈減碼"
-        short_term["desc"] = "股價跌破月線，短線轉弱。"
-        tp_short = last['MA20'] # 壓力變月線
-
+        short_term.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", "desc": "股價跌破月線，短線轉弱。"})
+        tp_short = last['MA20']
+    
     short_term["stop_loss"] = f"{sl_short:.2f}"
     short_term["take_profit"] = f"{tp_short:.2f}"
 
-    # ---------------------------
-    # B. 長線策略 (3 個月以上)
-    # ---------------------------
-    # 邏輯：看季線 (MA60) + MACD + 黃金分割
-    long_term = {
-        "title": "中性持有", "icon": "🐢", "color": "gray",
-        "action": "續抱", "stop_loss": 0, "take_profit": 0, "desc": "趨勢盤整"
-    }
-
-    # 長線停損參考：季線 (MA60)
+    # B. 長線
+    long_term = {"title": "中性持有", "icon": "🐢", "color": "gray", "action": "續抱", "stop_loss": 0, "take_profit": 0, "desc": "趨勢盤整"}
     sl_long = last['MA60'] if 'MA60' in df.columns else last_close * 0.85
-    # 長線停利參考：前波高點 (120日高)
     tp_long = df['high'].tail(120).max()
 
-    # 長多判斷 (股價在季線之上，且 MACD > 0)
-    macd_val = last['MACD'] if 'MACD' in df.columns else 0
-    
     if last_close > last['MA60']:
-        long_term["title"] = "長線多頭"
-        long_term["icon"] = "🚀"
-        long_term["color"] = "green"
-        long_term["action"] = "波段續抱"
-        long_term["desc"] = "站穩季線(生命線)，長多格局未變。"
-        
-        if macd_val < 0:
-            long_term["desc"] += " 但動能稍弱。"
-
-    # 長空判斷
+        long_term.update({"title": "長線多頭", "icon": "🚀", "color": "green", "action": "波段續抱", "desc": "站穩季線(生命線)，長多格局未變。"})
     elif last_close < last['MA60']:
-        long_term["title"] = "長線轉弱"
-        long_term["icon"] = "❄️"
-        long_term["color"] = "red"
-        long_term["action"] = "保守應對"
-        long_term["desc"] = "跌破季線，需提防中期趨勢反轉。"
-        tp_long = last['MA60'] # 壓力變季線
+        long_term.update({"title": "長線轉弱", "icon": "❄️", "color": "red", "action": "保守應對", "desc": "跌破季線，需提防中期趨勢反轉。"})
+        tp_long = last['MA60']
 
     long_term["stop_loss"] = f"{sl_long:.2f}"
     long_term["take_profit"] = f"{tp_long:.2f}"
-
     return short_term, long_term
 
 # ==========================================
@@ -303,40 +248,64 @@ if not df.empty:
     tab1, tab2, tab3 = st.tabs(["📊 K線圖", "💡 訊號診斷", "📐 黃金分割"])
 
     with tab1:
+        # === 1. 時間範圍選擇按鈕 ===
+        # 預設選 "3個月" (台股波段最適合)
+        time_period = st.radio(
+            "選擇時間範圍：",
+            ["1個月", "3個月", "半年", "1年"],
+            index=1,
+            horizontal=True
+        )
+
+        # === 2. 根據選擇切分資料 (Slicing) ===
+        # 注意：我們是在「算完」指標後才切分，這樣季線(MA60)才不會因為資料不足而消失
+        if time_period == "1個月":
+            plot_df = df.tail(20) # 約20個交易日
+        elif time_period == "3個月":
+            plot_df = df.tail(60) # 約60個交易日
+        elif time_period == "半年":
+            plot_df = df.tail(120)
+        else:
+            plot_df = df.tail(240) # 1年
+
         c1, c2 = st.columns(2)
         with c1: mas = st.multiselect("均線", ["MA5","MA10","MA20","MA60"], ["MA5","MA20","MA60"])
         with c2: inds = st.multiselect("副圖", ["Volume","KD","MACD","RSI"], ["Volume","KD"])
 
         add_plots = []
         colors = {'MA5':'orange', 'MA10':'cyan', 'MA20':'purple', 'MA60':'green'}
+        
+        # 畫均線 (用切分後的 plot_df)
         for ma in mas:
-            if ma in df.columns:
-                add_plots.append(mpf.make_addplot(df[ma], panel=0, color=colors[ma], width=1.0))
+            if ma in plot_df.columns:
+                add_plots.append(mpf.make_addplot(plot_df[ma], panel=0, color=colors[ma], width=1.0))
         
         pid = 0
         vol = False
         if "Volume" in inds: pid+=1; vol=True
-        if "KD" in inds and 'K' in df.columns:
+        if "KD" in inds and 'K' in plot_df.columns:
             pid+=1
-            add_plots.append(mpf.make_addplot(df['K'], panel=pid, color='orange'))
-            add_plots.append(mpf.make_addplot(df['D'], panel=pid, color='blue'))
-        if "MACD" in inds and 'MACD' in df.columns:
+            add_plots.append(mpf.make_addplot(plot_df['K'], panel=pid, color='orange'))
+            add_plots.append(mpf.make_addplot(plot_df['D'], panel=pid, color='blue'))
+        if "MACD" in inds and 'MACD' in plot_df.columns:
             pid+=1
-            add_plots.append(mpf.make_addplot(df['MACD'], panel=pid, color='red'))
-            add_plots.append(mpf.make_addplot(df['Signal'], panel=pid, color='blue'))
-            add_plots.append(mpf.make_addplot(df['Hist'], type='bar', panel=pid, color='gray', alpha=0.5))
-        if "RSI" in inds and 'RSI' in df.columns:
+            add_plots.append(mpf.make_addplot(plot_df['MACD'], panel=pid, color='red'))
+            add_plots.append(mpf.make_addplot(plot_df['Signal'], panel=pid, color='blue'))
+            add_plots.append(mpf.make_addplot(plot_df['Hist'], type='bar', panel=pid, color='gray', alpha=0.5))
+        if "RSI" in inds and 'RSI' in plot_df.columns:
             pid+=1
-            add_plots.append(mpf.make_addplot(df['RSI'], panel=pid, color='#9b59b6'))
-            add_plots.append(mpf.make_addplot([70]*len(df), panel=pid, color='gray', linestyle='dashed'))
-            add_plots.append(mpf.make_addplot([30]*len(df), panel=pid, color='gray', linestyle='dashed'))
+            add_plots.append(mpf.make_addplot(plot_df['RSI'], panel=pid, color='#9b59b6'))
+            add_plots.append(mpf.make_addplot([70]*len(plot_df), panel=pid, color='gray', linestyle='dashed'))
+            add_plots.append(mpf.make_addplot([30]*len(plot_df), panel=pid, color='gray', linestyle='dashed'))
 
         try:
+            # 畫圖
             fig, ax = mpf.plot(
-                df, type='candle', style='yahoo', volume=vol, 
+                plot_df, # 這裡傳入切分後的資料
+                type='candle', style='yahoo', volume=vol, 
                 addplot=add_plots, returnfig=True,
                 panel_ratios=tuple([2]+[1]*pid), figsize=(10, 8),
-                title=f"Stock Code: {stock_code}",
+                title=f"Stock Code: {stock_code} ({time_period})",
                 warn_too_much_data=10000
             )
             st.pyplot(fig)
@@ -344,7 +313,7 @@ if not df.empty:
 
     with tab2:
         st.subheader("🤖 AI 技術指標診斷")
-        signals = analyze_signals(df)
+        signals = analyze_signals(df) # 訊號分析依然使用完整資料，確保準確度
         col_s1, col_s2 = st.columns(2)
         mid = (len(signals) + 1) // 2
         with col_s1:
@@ -354,51 +323,35 @@ if not df.empty:
 
         st.divider()
         st.subheader("🎯 AI 操盤室")
-        
-        # 取得雙策略
         short_strat, long_strat = generate_dual_strategy(df)
         
         if short_strat and long_strat:
-            # 使用左右兩欄分割
             col_short, col_long = st.columns(2)
-            
-            # --- 左欄：短線策略 ---
             with col_short:
                 with st.container(border=True):
                     st.markdown(f"### {short_strat['icon']} 短線波段 (1個月)")
                     st.markdown(f"**{short_strat['title']}**")
                     st.caption(short_strat['desc'])
-                    
                     st.divider()
                     st.metric("建議動作", short_strat['action'])
                     st.metric("🛑 停損 (月線)", short_strat['stop_loss'])
                     st.metric("💰 停利 (壓力)", short_strat['take_profit'])
-                    
-                    if short_strat['color'] == 'green':
-                        st.success("核心：關注月線支撐與KD變化")
-                    elif short_strat['color'] == 'red':
-                        st.error("核心：嚴守紀律，反彈站不回月線要跑")
-                    else:
-                        st.warning("核心：RSI過熱，小心回馬槍")
+                    if short_strat['color'] == 'green': st.success("核心：關注月線支撐與KD變化")
+                    elif short_strat['color'] == 'red': st.error("核心：嚴守紀律，反彈站不回月線要跑")
+                    else: st.warning("核心：RSI過熱，小心回馬槍")
 
-            # --- 右欄：長線策略 ---
             with col_long:
                 with st.container(border=True):
                     st.markdown(f"### {long_strat['icon']} 長線投資 (3個月+)")
                     st.markdown(f"**{long_strat['title']}**")
                     st.caption(long_strat['desc'])
-                    
                     st.divider()
                     st.metric("建議動作", long_strat['action'])
                     st.metric("🛡️ 防守 (季線)", long_strat['stop_loss'])
                     st.metric("🎯 目標 (前高)", long_strat['take_profit'])
-                    
-                    if long_strat['color'] == 'green':
-                        st.success("觀點：季線向上，拉回皆是買點")
-                    else:
-                        st.error("觀點：季線下彎，中期趨勢修正中")
-        else:
-            st.warning("資料不足，無法生成策略")
+                    if long_strat['color'] == 'green': st.success("觀點：季線向上，拉回皆是買點")
+                    else: st.error("觀點：季線下彎，中期趨勢修正中")
+        else: st.warning("資料不足，無法生成策略")
 
     with tab3:
         st.subheader("黃金分割")
