@@ -22,6 +22,7 @@ def get_stock_data_v3(stock_code):
         try:
             ticker = f"{stock_code}{suffix}"
             stock = yf.Ticker(ticker)
+            # 抓取 500 天資料以確保長線黃金分割(240日)有資料
             temp_df = stock.history(period="500d", auto_adjust=False)
             
             if not temp_df.empty:
@@ -98,7 +99,7 @@ def calculate_indicators(df):
         if len(df) >= 20: df['MA20'] = df['close'].rolling(20).mean()
         if len(df) >= 60: df['MA60'] = df['close'].rolling(60).mean()
         
-        # Volume MA (新增：量能平均)
+        # Volume MA
         if len(df) >= 5: df['VolMA5'] = df['volume'].rolling(5).mean()
 
         # KD
@@ -134,67 +135,58 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 4. 深度分析模組 (新增)
+# 4. 深度分析模組
 # ==========================================
 def calculate_score(df):
-    """計算 AI 綜合評分 (0-100)"""
-    score = 50 # 基礎分
+    score = 50 
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. 趨勢面 (+/- 40%)
-    if last['close'] > last['MA20']: score += 10 # 站上月線
-    if last['MA20'] > last['MA60']: score += 10  # 月線大於季線
-    if last['close'] > last['MA60']: score += 10 # 站上季線
-    if last['MA5'] > last['MA20']: score += 10   # 短線多頭排列
+    # 趨勢
+    if last['close'] > last['MA20']: score += 10 
+    if last['MA20'] > last['MA60']: score += 10
+    if last['close'] > last['MA60']: score += 10
+    if last['MA5'] > last['MA20']: score += 10
     
     if last['close'] < last['MA20']: score -= 10
     if last['MA20'] < last['MA60']: score -= 10
     if last['close'] < last['MA60']: score -= 10
     if last['MA5'] < last['MA20']: score -= 10
     
-    # 2. 動能面 (+/- 30%)
+    # 動能
     if last['MACD'] > 0: score += 5
     if last['Hist'] > 0: score += 5
     if last['K'] > last['D']: score += 5
+    if last['RSI'] > 80: score -= 5 
+    if last['RSI'] < 20: score += 5 
     
-    # RSI 修正
-    if last['RSI'] > 80: score -= 5 # 過熱扣分
-    if last['RSI'] < 20: score += 5 # 超賣加分(反彈機會)
-    
-    # 3. 量能面 (+/- 20%)
-    # 如果上漲且出量
+    # 量能
     vol_ratio = last['volume'] / last['VolMA5'] if 'VolMA5' in df.columns else 1
     if last['close'] > prev['close'] and vol_ratio > 1.2: score += 5
-    if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5 # 下跌出量扣分
+    if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5
 
-    # 限制範圍
     return max(0, min(100, score))
 
 def analyze_volume(df):
-    """量能分析"""
     if 'VolMA5' not in df.columns: return "無量能資料"
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    
     vol_ratio = last['volume'] / last['VolMA5']
     price_change = last['close'] - prev['close']
     
     status = ""
     if vol_ratio > 1.5: status = "🔥 爆量"
-    elif vol_ratio > 1.2: status = "📈 溫和放量"
-    elif vol_ratio < 0.6: status = "❄️ 極度縮量"
+    elif vol_ratio > 1.2: status = "📈 放量"
+    elif vol_ratio < 0.6: status = "❄️ 窒息量"
     elif vol_ratio < 0.8: status = "📉 量縮"
-    else: status = "⚖️ 量能持平"
+    else: status = "⚖️ 量平"
     
-    # 組合解讀
     if price_change > 0:
-        if vol_ratio > 1.2: return f"{status}上攻 (攻擊訊號)"
-        if vol_ratio < 0.8: return f"{status}上漲 (惜售/背離)"
+        if vol_ratio > 1.2: return f"{status}上攻"
+        if vol_ratio < 0.8: return f"{status}惜售"
     else:
-        if vol_ratio > 1.2: return f"{status}下殺 (恐慌賣壓)"
-        if vol_ratio < 0.8: return f"{status}回檔 (籌碼穩定)"
-    
+        if vol_ratio > 1.2: return f"{status}下殺"
+        if vol_ratio < 0.8: return f"{status}回檔"
     return f"{status}整理"
 
 def analyze_signals(df):
@@ -207,8 +199,8 @@ def analyze_signals(df):
     if 'MA5' in df.columns and 'MA20' in df.columns:
         if last['MA5'] > last['MA20'] > last['MA60']: signals.append("🔥 **趨勢**：多頭排列")
         elif last['MA5'] < last['MA20'] < last['MA60']: signals.append("❄️ **趨勢**：空頭排列")
-        if prev['MA5'] < prev['MA20'] and last['MA5'] > last['MA20']: signals.append("✨ **均線金叉**：5日線穿過月線")
-        elif prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日線跌破月線")
+        if prev['MA5'] < prev['MA20'] and last['MA5'] > last['MA20']: signals.append("✨ **均線金叉**：5日穿月線")
+        elif prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
 
     # KD
     if 'K' in df.columns and 'D' in df.columns:
@@ -226,8 +218,8 @@ def analyze_signals(df):
 
     # RSI
     if 'RSI' in df.columns:
-        if last['RSI'] > 75: signals.append(f"⚠️ **RSI過熱** ({last['RSI']:.1f})")
-        elif last['RSI'] < 25: signals.append(f"💎 **RSI超賣** ({last['RSI']:.1f})")
+        if last['RSI'] > 75: signals.append(f"⚠️ **RSI過熱**")
+        elif last['RSI'] < 25: signals.append(f"💎 **RSI超賣**")
 
     return signals if signals else ["⚖️ 盤整中"]
 
@@ -236,33 +228,28 @@ def generate_dual_strategy(df):
     last = df.iloc[-1]
     last_close = last['close']
     
-    # 計算分數與量能
     score = calculate_score(df)
     vol_status = analyze_volume(df)
     
     # A. 短線
-    short_term = {
-        "title": "中性觀望", "icon": "⚖️", "color": "gray", 
-        "action": "觀望", "score": score, "vol": vol_status, "desc": "多空不明"
-    }
-    sl_short = last['MA20'] if 'MA20' in df.columns else last_close * 0.9
-    tp_short = last['BB_Up'] if 'BB_Up' in df.columns else last_close * 1.1
-
-    # 短線健檢清單 (True=通過, False=失敗)
     checklist = {
         "站上月線": last_close > last['MA20'],
         "KD金叉向上": last['K'] > last['D'],
         "MACD偏多": last['Hist'] > 0,
-        "量能健康": "上攻" in vol_status or "回檔" in vol_status,
+        "量能健康": "上攻" in vol_status or "回檔" in vol_status or "惜售" in vol_status,
         "RSI安全": 20 < last['RSI'] < 75
     }
+    
+    short_term = {"title": "中性觀望", "icon": "⚖️", "color": "gray", "action": "觀望", "score": score, "vol": vol_status, "desc": "多空不明"}
+    sl_short = last['MA20'] if 'MA20' in df.columns else last_close * 0.9
+    tp_short = last['BB_Up'] if 'BB_Up' in df.columns else last_close * 1.1
 
     if last_close > last['MA20']:
-        short_term.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", "desc": "股價站上月線，技術面偏多。"})
+        short_term.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", "desc": "股價站上月線，短線強勢。"})
         if last['RSI'] > 75:
-            short_term.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", "desc": "雖為多頭但過熱，留意修正。"})
+            short_term.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", "desc": "RSI過高，留意回檔。"})
     elif last_close < last['MA20']:
-        short_term.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", "desc": "跌破月線支撐，短線轉弱。"})
+        short_term.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", "desc": "跌破月線，短線轉弱。"})
         tp_short = last['MA20']
     
     short_term["stop_loss"] = f"{sl_short:.2f}"
@@ -275,29 +262,40 @@ def generate_dual_strategy(df):
     tp_long = df['high'].tail(120).max()
 
     if last_close > last['MA60']:
-        long_term.update({"title": "長線多頭", "icon": "🚀", "color": "green", "action": "波段續抱", "desc": "站穩季線(生命線)，長多格局未變。"})
+        long_term.update({"title": "長線多頭", "icon": "🚀", "color": "green", "action": "波段續抱", "desc": "站穩季線，長多格局。"})
     elif last_close < last['MA60']:
-        long_term.update({"title": "長線轉弱", "icon": "❄️", "color": "red", "action": "保守應對", "desc": "跌破季線，需提防中期趨勢反轉。"})
+        long_term.update({"title": "長線轉弱", "icon": "❄️", "color": "red", "action": "保守應對", "desc": "跌破季線，需提防反轉。"})
         tp_long = last['MA60']
 
     long_term["stop_loss"] = f"{sl_long:.2f}"
     long_term["take_profit"] = f"{tp_long:.2f}"
-    
     return short_term, long_term
 
 # ==========================================
-# 5. 黃金分割
+# 5. 黃金分割 (雙模式版)
 # ==========================================
-def calculate_fibonacci(df):
-    subset = df.tail(120)
-    high = subset['high'].max()
-    low = subset['low'].min()
-    diff = high - low
-    return {
-        '0.0 (低)': low, '0.382 (支撐)': low + diff * 0.382,
-        '0.5 (中關)': low + diff * 0.5, '0.618 (壓力)': low + diff * 0.618,
-        '1.0 (高)': high
-    }
+def calculate_fibonacci_dual(df):
+    
+    def get_levels(window_days):
+        if len(df) < window_days: return {}
+        subset = df.tail(window_days)
+        high = subset['high'].max()
+        low = subset['low'].min()
+        diff = high - low
+        return {
+            '0.0 (區間低)': low, 
+            '0.382': low + diff * 0.382,
+            '0.5 (中關)': low + diff * 0.5, 
+            '0.618': low + diff * 0.618,
+            '1.0 (區間高)': high
+        }
+    
+    # 短線: 近一季 (60天)
+    short_fib = get_levels(60)
+    # 長線: 近一年 (240天)
+    long_fib = get_levels(240)
+    
+    return short_fib, long_fib
 
 # ==========================================
 # 6. 主程式介面
@@ -330,7 +328,7 @@ if not df.empty:
     tab1, tab2, tab3 = st.tabs(["📊 K線圖", "💡 訊號診斷", "📐 黃金分割"])
 
     with tab1:
-        time_period = st.radio("選擇時間範圍：", ["1個月", "3個月", "半年", "1年"], index=1, horizontal=True)
+        time_period = st.radio("範圍：", ["1個月", "3個月", "半年", "1年"], index=1, horizontal=True)
         if time_period == "1個月": plot_df = df.tail(20)
         elif time_period == "3個月": plot_df = df.tail(60)
         elif time_period == "半年": plot_df = df.tail(120)
@@ -382,56 +380,59 @@ if not df.empty:
         st.divider()
         st.subheader("🎯 AI 操盤室")
         short_strat, long_strat = generate_dual_strategy(df)
-        
         if short_strat and long_strat:
             col_short, col_long = st.columns(2)
             
-            # === 短線卡片 ===
             with col_short:
                 with st.container(border=True):
-                    st.markdown(f"### {short_strat['icon']} 短線波段 (1個月)")
-                    
-                    # 1. AI 評分條
-                    score = short_strat['score']
-                    st.write(f"**AI 信心分數：{score} 分**")
-                    st.progress(score / 100)
-                    
-                    # 2. 策略狀態
-                    st.caption(f"量能狀態：{short_strat['vol']}")
+                    st.markdown(f"### {short_strat['icon']} 短線 (1個月)")
+                    st.write(f"**AI 信心：{short_strat['score']} 分**")
+                    st.progress(short_strat['score'] / 100)
+                    st.caption(f"量能：{short_strat['vol']}")
                     st.markdown(f"**{short_strat['title']}**")
                     st.write(short_strat['desc'])
-                    
                     st.divider()
-                    
-                    # 3. 多空健檢表
                     st.write("**✅ 多空健檢**")
-                    checks = short_strat['checklist']
-                    for name, passed in checks.items():
-                        icon = "✅" if passed else "❌"
-                        st.write(f"{icon} {name}")
-                    
+                    for name, passed in short_strat['checklist'].items():
+                        st.write(f"{'✅' if passed else '❌'} {name}")
                     st.divider()
-                    st.metric("建議動作", short_strat['action'])
-                    st.metric("🛑 停損 (月線)", short_strat['stop_loss'])
-                    st.metric("💰 停利 (壓力)", short_strat['take_profit'])
+                    st.metric("建議", short_strat['action'])
+                    st.metric("🛑 停損", short_strat['stop_loss'])
+                    st.metric("💰 停利", short_strat['take_profit'])
 
-            # === 長線卡片 ===
             with col_long:
                 with st.container(border=True):
-                    st.markdown(f"### {long_strat['icon']} 長線投資 (3個月+)")
+                    st.markdown(f"### {long_strat['icon']} 長線 (1年)")
                     st.markdown(f"**{long_strat['title']}**")
                     st.caption(long_strat['desc'])
-                    
                     st.divider()
-                    st.info("長線重點在於季線(60MA)的保護，只要季線方向向上且股價在季線之上，波段操作者可容忍短線波動。")
-                    
+                    st.info("季線(60MA)為生命線，季線之上且翻揚為長多格局。")
                     st.divider()
-                    st.metric("建議動作", long_strat['action'])
-                    st.metric("🛡️ 防守 (季線)", long_strat['stop_loss'])
-                    st.metric("🎯 目標 (前高)", long_strat['take_profit'])
+                    st.metric("建議", long_strat['action'])
+                    st.metric("🛡️ 防守", long_strat['stop_loss'])
+                    st.metric("🎯 目標", long_strat['take_profit'])
 
     with tab3:
-        st.subheader("黃金分割")
-        fib = calculate_fibonacci(df)
-        st.table(pd.DataFrame([{"位置":k, "價格":f"{v:.2f}"} for k,v in fib.items()]))
-        st.info(f"觀察：{fib['0.382 (支撐)']:.2f} 為強支撐；跌破 {fib['0.5 (中關)']:.2f} 轉弱")
+        st.subheader("📐 黃金分割率 (支撐/壓力)")
+        st.write("透過費波南希數列，計算出股價回檔或反彈的關鍵位置。")
+        
+        # 呼叫新的雙模式函數
+        short_fib, long_fib = calculate_fibonacci_dual(df)
+        
+        col_f1, col_f2 = st.columns(2)
+        
+        with col_f1:
+            st.markdown("#### ⚡ 短線 (近60日)")
+            if short_fib:
+                fib_df1 = pd.DataFrame([{"位置":k, "價格":f"{v:.2f}"} for k,v in short_fib.items()])
+                st.table(fib_df1)
+                st.info(f"觀察重點：短線回檔不破 **{short_fib['0.382']:.2f}** 為強勢整理。")
+            else:
+                st.warning("資料不足")
+
+        with col_f2:
+            st.markdown("#### 🐢 長線 (近240日)")
+            if long_fib:
+                fib_df2 = pd.DataFrame([{"位置":k, "價格":f"{v:.2f}"} for k,v in long_fib.items()])
+                st.table(fib_df2)
+                st.info(f"觀察重點：長線大支撐在 **{long_fib['0.5 (中關)']:.2f}**，跌破則轉空。")
