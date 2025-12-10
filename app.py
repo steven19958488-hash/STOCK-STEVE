@@ -1,38 +1,52 @@
 import streamlit as st
-import twstock
+import yfinance as yf  # 改用這個
 import pandas as pd
 import mplfinance as mpf
 
 # ---------------------------------------------------------
-# 1. 解決速度問題：使用 @st.cache_data 把資料暫存起來
+# 1. 改用 yfinance 抓取資料 (解決 SSL 錯誤與連線不穩)
 # ---------------------------------------------------------
 @st.cache_data
 def get_stock_data(stock_code):
     try:
-        stock = twstock.Stock(stock_code)
-        # 抓取資料 (這裡抓取較多天數以確保 MA60 算得出來)
-        data = stock.fetch_from(2023, 1) 
+        # 台股代碼在 Yahoo Finance 需要加上 ".TW" (例如 2330.TW)
+        ticker = f"{stock_code}.TW"
         
-        # 整理成 DataFrame
-        df = pd.DataFrame(data)
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
+        # 抓取從 2023 年初至今的資料
+        # auto_adjust=False 確保我們拿到的是原始的 OHLC，而不是調整後的
+        df = yf.download(ticker, start="2023-01-01", auto_adjust=False)
         
-        # 轉換型別為 float，避免畫圖報錯
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-            
+        if df.empty:
+            st.warning(f"找不到 {stock_code} 的資料，請確認代碼是否正確。")
+            return pd.DataFrame()
+
+        # --- 資料整理 ---
+        # Yahoo Finance 的欄位名稱通常是首字大寫 (Open, High...)
+        # 但我們後面的程式碼都用小寫 (open, high...)，所以這裡要統一轉小寫
+        df.columns = [c.lower() for c in df.columns]
+        
+        # 確保索引名稱是 date (yfinance 預設索引就是 Date)
+        df.index.name = 'date'
+        
+        # 處理可能的 MultiIndex (某些新版 yfinance 會有多層欄位)
+        if isinstance(df.columns, pd.MultiIndex):
+             df.columns = df.columns.get_level_values(0)
+
+        # 轉換時區 (Yahoo 有時會帶時區，mplfinance 不喜歡時區)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
         return df
+
     except Exception as e:
-        st.error(f"無法抓取股票資料，請檢查代碼是否正確。錯誤訊息: {e}")
+        st.error(f"資料抓取失敗: {e}")
         return pd.DataFrame()
 
 # ---------------------------------------------------------
-# 2. 計算指標的函數 (新增：均線 MA)
+# 2. 計算指標的函數 (維持不變，已包含均線)
 # ---------------------------------------------------------
 def calculate_indicators(df):
-    # --- 新增：計算均線 (MA) ---
-    # 使用 rolling().mean() 計算移動平均
+    # --- 計算均線 (MA) ---
     df['MA5'] = df['close'].rolling(window=5).mean()
     df['MA10'] = df['close'].rolling(window=10).mean()
     df['MA20'] = df['close'].rolling(window=20).mean()
@@ -53,7 +67,7 @@ def calculate_indicators(df):
     return df
 
 # ---------------------------------------------------------
-# 3. 主程式介面
+# 3. 主程式介面 (維持不變)
 # ---------------------------------------------------------
 st.title("股票技術分析儀表板")
 stock_code = st.text_input("輸入股票代碼", "2330")
@@ -63,72 +77,55 @@ if stock_code:
     df = get_stock_data(stock_code)
     
     if not df.empty:
-        # 步驟 B: 計算指標 (包含 MA)
+        # 步驟 B: 計算指標
         df = calculate_indicators(df)
 
         # 步驟 C: 介面控制
         col1, col2 = st.columns(2)
-        
         with col1:
-            # 讓使用者選擇要顯示的「均線」
-            selected_mas = st.multiselect(
-                "選擇均線 (MA)",
-                ["MA5", "MA10", "MA20", "MA60"],
-                default=["MA5", "MA20", "MA60"]
-            )
-
+            selected_mas = st.multiselect("選擇均線 (MA)", ["MA5", "MA10", "MA20", "MA60"], default=["MA5", "MA20", "MA60"])
         with col2:
-            # 讓使用者選擇要顯示的「副圖指標」
-            options = st.multiselect(
-                "選擇副圖指標",
-                ["Volume", "KD", "MACD"],
-                default=["Volume", "KD"]
-            )
+            options = st.multiselect("選擇副圖指標", ["Volume", "KD", "MACD"], default=["Volume", "KD"])
 
         # -----------------------------------------------------
-        # 4. 核心畫圖邏輯：使用 addplot 與 panel
+        # 4. 核心畫圖邏輯
         # -----------------------------------------------------
         add_plots = []
         
-        # --- 處理均線 (疊在主圖 panel=0) ---
-        # 定義顏色：MA5(白/黃), MA10(藍), MA20(紫/橘), MA60(綠)
+        # 均線顏色設定
         ma_colors = {'MA5': 'orange', 'MA10': 'cyan', 'MA20': 'purple', 'MA60': 'green'}
-        
         for ma in selected_mas:
-            # 這裡 panel=0 代表畫在 K 線那一格
-            add_plots.append(mpf.make_addplot(df[ma], panel=0, color=ma_colors[ma], width=1.0))
+            if ma in df.columns: # 確保有算出來才畫
+                add_plots.append(mpf.make_addplot(df[ma], panel=0, color=ma_colors[ma], width=1.0))
 
-        # --- 處理副圖 (Panel ID 遞增) ---
-        # 設定 panel 順序：主圖是 0
+        # 副圖設定
         panel_id = 0 
         
-        # 判斷是否顯示成交量 (Volume)
-        # 雖然 mplfinance 有 volume=True 參數，但為了排版控制，我們統一計算 panel_id
+        # 判斷成交量
+        show_vol = False
         if "Volume" in options:
             panel_id += 1
             show_vol = True
-        else:
-            show_vol = False
-
+            
+        # 判斷 KD
         if "KD" in options:
             panel_id += 1
             add_plots.append(mpf.make_addplot(df['K'], panel=panel_id, color='orange', title='KD'))
             add_plots.append(mpf.make_addplot(df['D'], panel=panel_id, color='blue'))
 
+        # 判斷 MACD
         if "MACD" in options:
             panel_id += 1
             add_plots.append(mpf.make_addplot(df['MACD'], panel=panel_id, color='red', title='MACD'))
             add_plots.append(mpf.make_addplot(df['Signal'], panel=panel_id, color='blue'))
             add_plots.append(mpf.make_addplot(df['Hist'], type='bar', panel=panel_id, color='gray', alpha=0.5))
 
-        # 動態計算 panel_ratios (高度比例)
-        # 主圖固定佔 2 份，其他副圖各佔 1 份
-        # 比如有 2 個副圖，比例就是 (2, 1, 1)
+        # 調整比例
         current_ratios = [2] + [1] * panel_id
 
-        st.write(f"目前顯示: {stock_code} | 均線: {', '.join(selected_mas)}")
+        st.write(f"目前顯示: {stock_code} (來源: Yahoo Finance)")
         
-        # 畫圖 
+        # 畫圖
         fig, axlist = mpf.plot(
             df, 
             type='candle', 
@@ -136,9 +133,8 @@ if stock_code:
             volume=show_vol, 
             addplot=add_plots, 
             returnfig=True,
-            panel_ratios=tuple(current_ratios), # 使用動態計算的比例
+            panel_ratios=tuple(current_ratios),
             figsize=(10, 8),
             title=f"{stock_code} Daily Chart"
         )
-        
         st.pyplot(fig)
