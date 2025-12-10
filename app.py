@@ -2,9 +2,10 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import mplfinance as mpf
+import time
 
 # ==========================================
-# 1. 資料抓取函數 (v2.1 穩定版)
+# 1. 資料抓取函數 (v3.0 防禦強化版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_stock_data_v2(stock_code):
@@ -14,36 +15,38 @@ def get_stock_data_v2(stock_code):
     df = pd.DataFrame()
     found_ticker = ""
 
-    # 自動嘗試上市/上櫃後綴
     for suffix in suffixes:
         try:
             ticker = f"{stock_code}{suffix}"
-            # progress=False 讓 log 更乾淨
-            temp_df = yf.download(ticker, start="2023-01-01", progress=False)
+            
+            # --- 修改點：改用 Ticker.history (較不易被擋) ---
+            stock = yf.Ticker(ticker)
+            # auto_adjust=False 修復了您看到的 FutureWarning
+            temp_df = stock.history(start="2023-01-01", auto_adjust=False)
             
             if not temp_df.empty:
                 df = temp_df
                 found_ticker = ticker
                 break
+            
+            # 如果失敗，稍微休息一下再試下一個，避免瞬間發送太多請求
+            time.sleep(0.5) 
+            
         except Exception:
             continue
 
     if df.empty:
         return pd.DataFrame(), ""
 
-    # --- 資料清洗與格式修正 ---
+    # --- 資料清洗 ---
     try:
-        # 1. 處理 MultiIndex (Yahoo 新版格式)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        
-        # 2. 統一轉小寫 (Open -> open)
-        df.columns = [str(c).lower() for c in df.columns]
-        
-        # 3. 處理時區
-        df.index.name = 'date'
+        # 移除時區 (Yahoo history 預設會有時區)
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+        
+        # 確保欄位名稱小寫 (Open -> open)
+        df.columns = [str(c).lower() for c in df.columns]
+        df.index.name = 'date'
             
         return df, found_ticker
     except Exception as e:
@@ -51,20 +54,19 @@ def get_stock_data_v2(stock_code):
         return pd.DataFrame(), ""
 
 # ==========================================
-# 2. 獲取公司名稱 (新增：優先抓中文名)
+# 2. 獲取公司名稱 (優先抓中文)
 # ==========================================
-@st.cache_data(ttl=86400) # 快取一天
+@st.cache_data(ttl=86400)
 def get_stock_name(ticker_symbol, code_only):
-    # 1. 嘗試用 twstock 抓中文名稱 (最準)
+    # 1. 嘗試用 twstock 抓中文 (不會被 Yahoo 擋)
     try:
         import twstock
-        # twstock 的 key 是純數字 (例如 '2330')
         if code_only in twstock.codes:
             return twstock.codes[code_only].name
     except:
-        pass # 如果失敗(沒安裝或找不到)就繼續往下
+        pass 
     
-    # 2. 嘗試用 yfinance 抓名稱 (通常是英文)
+    # 2. 嘗試用 yfinance 抓備用名稱
     try:
         t = yf.Ticker(ticker_symbol)
         info = t.info
@@ -164,8 +166,12 @@ col1, col2 = st.columns([1, 2])
 with col1:
     stock_code = st.text_input("輸入代碼", "2330")
 
-# 先抓資料
-df, valid_ticker = get_stock_data_v2(stock_code)
+# 這裡需要等待一下，如果被擋，顯示友善訊息
+try:
+    df, valid_ticker = get_stock_data_v2(stock_code)
+except Exception as e:
+    st.error("連線過於頻繁，請休息 15 分鐘後再試。")
+    df = pd.DataFrame()
 
 with col2:
     if not df.empty:
@@ -177,19 +183,18 @@ with col2:
         change = last_price - prev_price
         pct = (change / prev_price) * 100
         
-        # 顯示大標題：台積電 (2330)
         st.metric(
             label=f"{name} ({stock_code})",
             value=f"{last_price:.2f}",
             delta=f"{change:.2f} ({pct:.2f}%)"
         )
     else:
-        st.info("請輸入代碼 (例如 2330 或 0050)")
+        if stock_code: # 如果有輸入代碼但沒資料，才顯示提示
+             st.caption("若顯示 Rate Limit 錯誤，請稍候再試。")
 
 if not df.empty:
     df = calculate_indicators(df)
     
-    # 三個分頁
     tab1, tab2, tab3 = st.tabs(["📊 K線圖", "💡 訊號", "📐 黃金分割"])
 
     # Tab 1
