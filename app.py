@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ==========================================
-# 1. 資料抓取函數 (v3.1)
+# 1. 資料抓取函數
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_stock_data_v3(stock_code):
@@ -44,42 +44,53 @@ def get_stock_data_v3(stock_code):
         return pd.DataFrame(), ""
 
 # ==========================================
-# 2. 獲取公司名稱 (大絕招：直接爬網頁)
+# 2. 獲取公司名稱 (混合版：字典 + 爬標題)
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_stock_name(stock_code):
     code = str(stock_code).strip()
     
-    # 網址：Yahoo 奇摩股市 (台灣)
-    url = f"https://tw.stock.yahoo.com/quote/{code}"
-    
+    # --- 方法 A: 內建熱門股字典 (秒開、最準) ---
+    stock_map = {
+        "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", "00929": "復華台灣科技優息",
+        "00919": "群益台灣精選高息", "006208": "富邦台50", "00713": "元大台灣高息低波",
+        "2330": "台積電", "2454": "聯發科", "2303": "聯電", "2317": "鴻海",
+        "2308": "台達電", "3711": "日月光投控", "2382": "廣達", "3231": "緯創",
+        "6669": "緯穎", "2357": "華碩", "2356": "英業達", "3008": "大立光",
+        "3034": "聯詠", "2379": "瑞昱", "3037": "欣興", "3035": "智原",
+        "3443": "創意", "3661": "世芯-KY", "5269": "祥碩", "2408": "南亞科",
+        "2344": "華邦電", "5347": "世界先進", "6770": "力積電", "2353": "宏碁",
+        "2324": "仁寶", "3017": "奇鋐", "3324": "雙鴻", "2376": "技嘉", "2377": "微星",
+        "3293": "鈊象", "2603": "長榮", "2609": "陽明", "2615": "萬海", "2618": "長榮航",
+        "2610": "華航", "2002": "中鋼", "1101": "台泥", "1102": "亞泥", "1605": "華新",
+        "6505": "台塑化", "1301": "台塑", "1303": "南亞", "1326": "台化",
+        "2881": "富邦金", "2882": "國泰金", "2891": "中信金", "2886": "兆豐金",
+        "2884": "玉山金", "2885": "元大金", "2880": "華南金", "2883": "開發金",
+        "2892": "第一金", "2890": "永豐金", "2887": "台新金", "5880": "合庫金"
+    }
+    if code in stock_map:
+        return stock_map[code]
+
+    # --- 方法 B: 爬取網頁 Title (針對冷門股) ---
     try:
-        # 偽裝成瀏覽器，避免被擋
+        url = f"https://tw.stock.yahoo.com/quote/{code}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
         }
-        
-        # 發送請求
         response = requests.get(url, headers=headers, timeout=5)
         
-        # 如果網頁回應正常
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Yahoo 股市的公司名稱通常在 <h1 class="... Fz(24px) ..."> 裡面
-            # 我們直接抓 h1 標籤
-            h1_tag = soup.find('h1')
-            if h1_tag:
-                raw_name = h1_tag.text # 例如 "台積電(2330)"
-                # 把括號後面的代號去掉，只留名字
-                if "(" in raw_name:
-                    return raw_name.split("(")[0]
-                return raw_name
-    except Exception as e:
-        print(f"爬蟲失敗: {e}")
+            # 抓取網頁標題 <title>，例如 "台積電(2330) - 個股走勢..."
+            title_text = soup.title.string
+            if title_text:
+                # 只取括號前面的部分
+                if "(" in title_text:
+                    return title_text.split("(")[0].strip()
+                return title_text
+    except Exception:
         pass
 
-    # 如果爬蟲失敗，回傳代號
     return code
 
 # ==========================================
@@ -158,12 +169,12 @@ with col1:
 try:
     df, valid_ticker = get_stock_data_v3(stock_code)
 except:
-    st.error("系統忙碌中 (Rate Limit)，請稍後再試")
+    st.error("系統忙碌中，請稍後再試")
     df = pd.DataFrame()
 
 with col2:
     if not df.empty:
-        # === 呼叫爬蟲函數 ===
+        # === 呼叫混合版名稱函數 ===
         name = get_stock_name(stock_code)
         
         last = df.iloc[-1]['close']
