@@ -42,11 +42,14 @@ def get_stock_data_v3(stock_code):
 @st.cache_data(ttl=86400)
 def get_stock_name(stock_code):
     code = str(stock_code).strip()
-    # 這裡保留一些熱門股名稱，加快顯示速度
     stock_map = {
-        "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2303": "聯電",
-        "2603": "長榮", "2609": "陽明", "2615": "萬海", "2881": "富邦金",
-        "2882": "國泰金", "0050": "元大台灣50", "0056": "元大高股息"
+        "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", "00929": "復華台灣科技優息",
+        "2330": "台積電", "2454": "聯發科", "2303": "聯電", "2317": "鴻海",
+        "2308": "台達電", "3711": "日月光投控", "2382": "廣達", "3231": "緯創",
+        "6669": "緯穎", "2357": "華碩", "2356": "英業達", "3008": "大立光",
+        "3034": "聯詠", "2379": "瑞昱", "3037": "欣興", "2603": "長榮", "2609": "陽明",
+        "2615": "萬海", "2618": "長榮航", "2610": "華航", "2002": "中鋼",
+        "2881": "富邦金", "2882": "國泰金", "2891": "中信金"
     }
     if code in stock_map: return stock_map[code]
     try:
@@ -134,9 +137,17 @@ def calculate_score(df):
     if last['MACD'] > 0: score += 5
     if last['Hist'] > 0: score += 5
     if last['K'] > last['D']: score += 5
+    if last['RSI'] > 80: score -= 5 
+    if last['RSI'] < 20: score += 5 
     
     vol_ratio = last['volume'] / last['VolMA5'] if 'VolMA5' in df.columns else 1
-    if vol_ratio > 1.2: score += 5 
+    if last['close'] > prev['close'] and vol_ratio > 1.2: score += 5 
+    if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5 
+    if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True: score += 5
+    if 'Vol_Dec' in df.columns and last['Vol_Dec'] == True: score -= 5 
+    
+    adx_filter = last['ADX'] > 25 if 'ADX' in df.columns and not pd.isna(last['ADX']) else False
+    if adx_filter: score += 5
     
     if 'BBW' in df.columns and last['BBW'] > df['BBW'].tail(60).quantile(0.85):
         if last['close'] > last['BB_Up']: score = 100 
@@ -147,12 +158,19 @@ def analyze_volume(df):
     if 'VolMA5' not in df.columns: return "無量能資料"
     last = df.iloc[-1]
     vol_ratio = last['volume'] / last['VolMA5']
-    status = "量平"
+    
+    vol_trend_msg = ""
+    if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True: vol_trend_msg = "🔥 3日連增"
+    elif 'Vol_Dec' in df.columns and last['Vol_Dec'] == True: vol_trend_msg = "❄️ 3日連縮"
+    
+    status = ""
     if vol_ratio > 1.5: status = "爆量"
     elif vol_ratio > 1.2: status = "放量"
     elif vol_ratio < 0.6: status = "窒息量"
     elif vol_ratio < 0.8: status = "量縮"
-    return status
+    else: status = "量平"
+
+    return f"{status} ({vol_trend_msg if vol_trend_msg else '量能持平'})"
 
 def analyze_signals(df):
     if len(df) < 2: return ["資料不足"]
@@ -160,23 +178,34 @@ def analyze_signals(df):
     prev = df.iloc[-2]
     signals = []
     
+    if 'ATR_Avg' in df.columns and not pd.isna(last['ATR_Avg']):
+        current_atr = last['ATR']
+        avg_atr = last['ATR_Avg']
+        if current_atr > avg_atr * 1.5: signals.append(f"🚨 **波動度過高**：風險放大，建議減小部位。")
+        elif current_atr < avg_atr * 0.5: signals.append(f"😴 **波動度極低**：市場極度沉悶。")
+
     if 'BBW' in df.columns:
         bbw_avg = df['BBW'].tail(60).mean()
-        if last['close'] > last['BB_Up'] and last['BBW'] > bbw_avg * 1.2:
-             signals.append("🚀 **趨勢突破確立**：股價創高且布林通道開口放大。")
+        if last['BBW'] < bbw_avg * 0.8: signals.append("🧘 **低波動整理**：布林通道收斂，等待大行情。")
+        elif last['close'] > last['BB_Up'] and last['BBW'] > bbw_avg * 1.2: signals.append("🚀 **趨勢突破確立**：股價創高且布林通道開口放大。")
     
     if 'MA5' in df.columns and 'MA20' in df.columns:
         if last['MA5'] > last['MA20'] > last['MA60']: signals.append("🔥 **趨勢**：多頭排列")
+        elif last['MA5'] < last['MA20'] < last['MA60']: signals.append("❄️ **趨勢**：空頭排列")
         if prev['MA5'] < prev['MA20'] and last['MA5'] > last['MA20']: signals.append("✨ **均線金叉**：5日穿月線")
-        if prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
+        elif prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
         
-    if 'K' in df.columns and 'D' in df.columns:
-        if last['K'] > last['D'] and prev['K'] < prev['D']: signals.append(f"📈 **KD金叉**")
-        elif last['K'] < last['D'] and prev['K'] > prev['D']: signals.append(f"📉 **KD死叉**")
-        
-    if 'Hist' in df.columns:
-        if last['Hist'] > 0 and prev['Hist'] < 0: signals.append("🟢 **MACD翻紅**")
-        elif last['Hist'] < 0 and prev['Hist'] > 0: signals.append("🔴 **MACD翻綠**")
+    if 'ADX' in df.columns and not pd.isna(last['ADX']):
+        adx_val = last['ADX']
+        if adx_val > 40: signals.append(f"🚀 **ADX極強 ({adx_val:.1f})**：趨勢爆發，動能最強。")
+        elif adx_val > 25: signals.append(f"💪 **ADX強勢 ({adx_val:.1f})**：趨勢確立，可信度高。")
+        elif adx_val < 20: signals.append(f"🟰 **ADX疲弱 ({adx_val:.1f})**：進入盤整，訊號可信度低。")
+            
+    if 'OBV' in df.columns:
+        obv_trend = last['OBV'] > df['OBV'].iloc[-5:-1].mean()
+        price_up = last['close'] > df['close'].iloc[-5:-1].mean()
+        if obv_trend and price_up: signals.append("✅ **量價同步**：OBV上升，量能推動價格。")
+        elif not obv_trend and price_up: signals.append("❌ **量價背離**：價格上漲，但OBV下降，上漲動能不足。")
         
     return signals if signals else ["⚖️ 盤整中"]
 
@@ -202,13 +231,23 @@ def generate_dual_strategy(df):
     if score >= 95:
         strategy = strategy_base.copy()
         strategy.update({"title": "🚀 趨勢噴發", "icon": "🚀", "color": "green", "action": "現價佈局", 
-                         "desc": "訊號極強，已脫離整理區間。",
-                         "entry_text": f"建議現價或回測 **{last['MA5']:.2f}** 佈局。"})
+                         "desc": "訊號極強，已脫離整理區間，建議現價或拉回 5日線佈局。",
+                         "entry_text": f"建議現價或回測 **{last['MA5']:.2f}** 佈局 (高風險高報酬)。"})
     elif last_close > last['MA20'] and last['K'] < 80:
         strategy = strategy_base.copy()
         strategy.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", 
                          "desc": "股價站上月線，短線強勢。",
                          "entry_text": f"建議拉回測試 **{last['MA20']:.2f} (月線)** 不破時佈局。"})
+        
+        if last_close > last['close'].shift(1) and last['volume'] < last['VolMA5']:
+             strategy.update({"title": "📈 價漲量縮", "icon": "⚠️", "color": "orange", "action": "持股續抱，勿追高", 
+                              "desc": "多頭趨勢，但量能不足，追高有風險。",
+                              "entry_text": f"持股續抱，空手者等待回測 **{last['MA5']:.2f}** 觀察。"})
+        
+        if last['RSI'] > 75: 
+            strategy.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", 
+                             "desc": "雖為多頭但過熱，留意修正。",
+                             "entry_text": f"建議等待回測 **{last['MA5']:.2f}** 再觀察。"})
     elif last_close < last['MA20']:
         strategy = strategy_base.copy()
         strategy.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", 
@@ -247,46 +286,44 @@ def calculate_fibonacci_multi(df):
     return get_levels(20), get_levels(60), get_levels(240)
 
 # ==========================================
-# 5. 核心功能：財務數據 (新增)
+# 5. 核心功能：財務數據 (穩健版)
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_financial_data(stock_code):
+    metrics = {"PE": "N/A", "EPS": "N/A", "Yield": "N/A", "PB": "N/A"}
+    chart_df = pd.DataFrame()
+    
+    # 嘗試 1: 使用 yfinance 抓取指標
     try:
         ticker = yf.Ticker(f"{stock_code}.TW")
-        
-        # 1. 抓取主要財務指標
         info = ticker.info
-        metrics = {
-            "PE": info.get('trailingPE', 'N/A'),
-            "EPS": info.get('trailingEps', 'N/A'),
-            "Yield": f"{info.get('dividendYield', 0) * 100:.2f}%" if info.get('dividendYield') else "N/A",
-            "PB": info.get('priceToBook', 'N/A')
-        }
         
-        # 2. 抓取季報 (營收與獲利)
-        # quarterly_financials 可能會有 "Total Revenue", "Net Income"
-        fin_stmt = ticker.quarterly_income_stmt.T # 轉置，讓日期當 Index
-        
-        # 整理圖表需要的 DataFrame
-        chart_df = pd.DataFrame()
-        
+        # 檢查是否有資料，如果有則更新
+        if info:
+            if 'trailingPE' in info: metrics['PE'] = f"{info['trailingPE']:.2f}"
+            if 'trailingEps' in info: metrics['EPS'] = f"{info['trailingEps']:.2f}"
+            if 'dividendYield' in info and info['dividendYield']: metrics['Yield'] = f"{info['dividendYield']*100:.2f}%"
+            if 'priceToBook' in info: metrics['PB'] = f"{info['priceToBook']:.2f}"
+    except:
+        # 如果 yfinance 失敗，可以考慮要在這裡加入備用爬蟲，或直接顯示 N/A
+        # 為了穩定，目前先保持 N/A，但提供下方連結讓使用者查詢
+        pass
+
+    # 嘗試 2: 使用 yfinance 抓取財報圖表
+    try:
+        fin_stmt = ticker.quarterly_income_stmt.T
         if not fin_stmt.empty:
-            # 嘗試找尋對應的欄位名稱 (Yahoo 的欄位名稱有時會變)
             rev_col = [c for c in fin_stmt.columns if "Revenue" in str(c) or "Sales" in str(c)]
             inc_col = [c for c in fin_stmt.columns if "Net Income" in str(c)]
-            
             if rev_col and inc_col:
-                # 取最近 5 季
-                recent = fin_stmt.head(5).iloc[::-1] # 反轉順序，由舊到新
+                recent = fin_stmt.head(5).iloc[::-1]
                 chart_df['Revenue'] = recent[rev_col[0]]
                 chart_df['Net Income'] = recent[inc_col[0]]
-                # 簡化日期格式
                 chart_df.index = chart_df.index.strftime('%Y-Q%q') 
+    except:
+        pass
         
-        return metrics, chart_df
-        
-    except Exception as e:
-        return None, pd.DataFrame()
+    return metrics, chart_df
 
 # ==========================================
 # 6. 主程式介面
@@ -432,41 +469,40 @@ if not df.empty:
             st.markdown("#### 🐢 長線 (240日)")
             if l_fib: st.table(pd.DataFrame([{"位置":k, "價格":f"{v:.2f}"} for k,v in l_fib.items()]))
 
-    # 新增的 Tab 4: 營收與獲利 (財務基本面)
+    # Tab 4: 營收與獲利 (容錯版)
     with tab4:
         st.subheader(f"💰 {name} ({stock_code}) 營收與獲利概況")
         
-        # 抓取財務數據
+        # 抓取資料 (若失敗則回傳空值)
         metrics, fin_df = get_financial_data(stock_code)
         
-        if metrics:
-            # 1. 顯示關鍵指標
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("本益比 (PE)", f"{metrics['PE']:.2f}" if isinstance(metrics['PE'], (int, float)) else "N/A")
-            m2.metric("每股盈餘 (EPS)", f"{metrics['EPS']:.2f}" if isinstance(metrics['EPS'], (int, float)) else "N/A")
-            m3.metric("殖利率 (Yield)", metrics['Yield'])
-            m4.metric("股價淨值比 (PB)", f"{metrics['PB']:.2f}" if isinstance(metrics['PB'], (int, float)) else "N/A")
+        # 1. 顯示關鍵指標 (若抓不到則顯示 N/A，不報錯)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("本益比 (PE)", metrics['PE'])
+        m2.metric("每股盈餘 (EPS)", metrics['EPS'])
+        m3.metric("殖利率 (Yield)", metrics['Yield'])
+        m4.metric("股價淨值比 (PB)", metrics['PB'])
+        
+        st.divider()
+        
+        # 2. 顯示圖表 (若有數據才畫圖)
+        if not fin_df.empty:
+            st.markdown("#### 📊 近五季營收趨勢 (單位：元)")
+            st.bar_chart(fin_df['Revenue'])
             
-            st.divider()
-            
-            # 2. 顯示圖表 (如果有數據)
-            if not fin_df.empty:
-                st.markdown("#### 📊 近五季營收趨勢 (單位：元)")
-                st.bar_chart(fin_df['Revenue'])
-                
-                st.markdown("#### 💵 近五季稅後淨利 (單位：元)")
-                st.bar_chart(fin_df['Net Income'])
-            else:
-                st.info("尚無完整的季報數據，可能為新上市股票或 ETF。")
+            st.markdown("#### 💵 近五季稅後淨利 (單位：元)")
+            st.bar_chart(fin_df['Net Income'])
         else:
-            st.warning("無法獲取財務數據，請稍後重試。")
+            # 若 yfinance 沒資料，顯示提示並提供連結
+            st.warning("⚠️ 暫時無法獲取圖表數據 (可能是資料源連線問題或 ETF)。")
+            st.markdown("建議您透過下方連結查看完整財報：")
             
         st.divider()
-        st.markdown("#### 🔗 外部詳細財報連結")
+        st.markdown("#### 🔗 詳細財報連結")
         c_l1, c_l2 = st.columns(2)
         with c_l1:
             url_goodinfo = f"https://goodinfo.tw/tw/StockBzPerformance.asp?STOCK_ID={stock_code}"
-            st.link_button("👉 Goodinfo! (完整財報)", url_goodinfo)
+            st.link_button("👉 Goodinfo! (中文完整財報)", url_goodinfo)
         with c_l2:
             url_cmoney = f"https://www.cmoney.tw/forum/stock/{stock_code}"
             st.link_button("👉 CMoney (股市同學會)", url_cmoney)
