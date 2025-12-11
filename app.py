@@ -65,17 +65,19 @@ def get_stock_name(stock_code):
     return code
 
 # ==========================================
-# 3. 指標計算
+# 3. 指標計算 (完整版：含 ADX, OBV, ATR)
 # ==========================================
 def calculate_indicators(df):
     df = df.copy()
     try:
+        # MA & Volume MA
         if len(df) >= 5: df['MA5'] = df['close'].rolling(5).mean()
         if len(df) >= 10: df['MA10'] = df['close'].rolling(10).mean()
         if len(df) >= 20: df['MA20'] = df['close'].rolling(20).mean()
         if len(df) >= 60: df['MA60'] = df['close'].rolling(60).mean()
         if len(df) >= 5: df['VolMA5'] = df['volume'].rolling(5).mean()
 
+        # KD & MACD & RSI & BB & BBW
         rsv_min = df['low'].rolling(9).min()
         rsv_max = df['high'].rolling(9).max()
         rsv_den = rsv_max - rsv_min
@@ -83,72 +85,92 @@ def calculate_indicators(df):
         df['RSV'] = (df['close'] - rsv_min) / rsv_den * 100
         df['K'] = df['RSV'].ewm(com=2).mean()
         df['D'] = df['K'].ewm(com=2).mean()
-
         exp12 = df['close'].ewm(span=12, adjust=False).mean()
         exp26 = df['close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = exp12 - exp26
         df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['Hist'] = df['MACD'] - df['Signal']
-
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
-
         df['BB_Mid'] = df['close'].rolling(window=20).mean()
         df['BB_Std'] = df['close'].rolling(window=20).std()
         df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
         df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
         df['BBW'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
         
+        # --- 進階指標：OBV & ADX & ATR ---
         df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
-        df['DX'] = (abs((df['high'] - df['high'].shift(1)) - (df['low'].shift(1) - df['low'])) / df['close']) * 100
-        df['ADX'] = df['DX'].ewm(span=14).mean()
         
+        # ADX 計算
+        df['UpMove'] = df['high'] - df['high'].shift(1)
+        df['DownMove'] = df['low'].shift(1) - df['low']
+        df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
+        df['-DM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
+        df['TR'] = np.where((df['high'] - df['low']) > (df['high'] - df['close'].shift(1)).abs(),
+                             np.where((df['high'] - df['low']) > (df['low'] - df['close'].shift(1)).abs(),
+                                      df['high'] - df['low'], (df['low'] - df['close'].shift(1)).abs()),
+                             (df['high'] - df['close'].shift(1)).abs()).fillna(0)
+        n = 14
+        df['ATR'] = df['TR'].ewm(span=n, adjust=False).mean()
+        df['+DM_EMA'] = df['+DM'].ewm(span=n, adjust=False).mean()
+        df['-DM_EMA'] = df['-DM'].ewm(span=n, adjust=False).mean()
+        df['+DI'] = (df['+DM_EMA'] / df['ATR']) * 100
+        df['-DI'] = (df['-DM_EMA'] / df['ATR']) * 100
+        df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])) * 100
+        df['ADX'] = df['DX'].ewm(span=n, adjust=False).mean()
+        
+        # 量能趨勢
         df['Vol_Shift1'] = df['volume'].shift(1)
         df['Vol_Shift2'] = df['volume'].shift(2)
         df['Vol_Inc'] = (df['volume'] > df['Vol_Shift1']) & (df['Vol_Shift1'] > df['Vol_Shift2'])
         df['Vol_Dec'] = (df['volume'] < df['Vol_Shift1']) & (df['Vol_Shift1'] < df['Vol_Shift2'])
         
-        df['ATR'] = (df['high'] - df['low']).rolling(14).mean()
+        # ATR 平均 (波動度)
         df['ATR_Avg'] = df['ATR'].tail(20).mean()
 
     except Exception: pass
     return df
 
 # ==========================================
-# 4. 策略與分析
+# 4. 深度 AI 策略分析 (含評分與多空健檢)
 # ==========================================
 def calculate_score(df):
     score = 50 
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
+    # 1. 趨勢 (40%)
     if last['close'] > last['MA20']: score += 10 
     if last['MA20'] > last['MA60']: score += 10
     if last['close'] > last['MA60']: score += 10
     if last['MA5'] > last['MA20']: score += 10
+    
     if last['close'] < last['MA20']: score -= 10
     if last['MA20'] < last['MA60']: score -= 10
     if last['close'] < last['MA60']: score -= 10
     if last['MA5'] < last['MA20']: score -= 10
     
-    if last['MACD'] > 0: score += 5
-    if last['Hist'] > 0: score += 5
-    if last['K'] > last['D']: score += 5
+    # 2. 動能 (30%) - 考慮 ADX 濾鏡
+    adx_filter = last['ADX'] > 25 if 'ADX' in df.columns and not pd.isna(last['ADX']) else True
+    
+    if last['MACD'] > 0 and adx_filter: score += 5
+    if last['Hist'] > 0 and adx_filter: score += 5
+    if last['K'] > last['D'] and adx_filter: score += 5
+    
+    # RSI 修正
     if last['RSI'] > 80: score -= 5 
     if last['RSI'] < 20: score += 5 
     
+    # 3. 量價 (20%)
     vol_ratio = last['volume'] / last['VolMA5'] if 'VolMA5' in df.columns else 1
     if last['close'] > prev['close'] and vol_ratio > 1.2: score += 5 
     if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5 
     if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True: score += 5
-    if 'Vol_Dec' in df.columns and last['Vol_Dec'] == True: score -= 5 
     
-    adx_filter = last['ADX'] > 25 if 'ADX' in df.columns and not pd.isna(last['ADX']) else False
-    if adx_filter: score += 5
-    
+    # 4. 突破 (10%)
     if 'BBW' in df.columns and last['BBW'] > df['BBW'].tail(60).quantile(0.85):
         if last['close'] > last['BB_Up']: score = 100 
         
@@ -157,20 +179,19 @@ def calculate_score(df):
 def analyze_volume(df):
     if 'VolMA5' not in df.columns: return "無量能資料"
     last = df.iloc[-1]
-    vol_ratio = last['volume'] / last['VolMA5']
     
     vol_trend_msg = ""
     if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True: vol_trend_msg = "🔥 3日連增"
     elif 'Vol_Dec' in df.columns and last['Vol_Dec'] == True: vol_trend_msg = "❄️ 3日連縮"
     
-    status = ""
+    vol_ratio = last['volume'] / last['VolMA5']
+    status = "量平"
     if vol_ratio > 1.5: status = "爆量"
     elif vol_ratio > 1.2: status = "放量"
     elif vol_ratio < 0.6: status = "窒息量"
     elif vol_ratio < 0.8: status = "量縮"
-    else: status = "量平"
 
-    return f"{status} ({vol_trend_msg if vol_trend_msg else '量能持平'})"
+    return f"{status} ({vol_trend_msg if vol_trend_msg else '持平'})"
 
 def analyze_signals(df):
     if len(df) < 2: return ["資料不足"]
@@ -178,23 +199,26 @@ def analyze_signals(df):
     prev = df.iloc[-2]
     signals = []
     
+    # ATR
     if 'ATR_Avg' in df.columns and not pd.isna(last['ATR_Avg']):
         current_atr = last['ATR']
         avg_atr = last['ATR_Avg']
         if current_atr > avg_atr * 1.5: signals.append(f"🚨 **波動度過高**：風險放大，建議減小部位。")
         elif current_atr < avg_atr * 0.5: signals.append(f"😴 **波動度極低**：市場極度沉悶。")
 
+    # BB 突破
     if 'BBW' in df.columns:
         bbw_avg = df['BBW'].tail(60).mean()
         if last['BBW'] < bbw_avg * 0.8: signals.append("🧘 **低波動整理**：布林通道收斂，等待大行情。")
         elif last['close'] > last['BB_Up'] and last['BBW'] > bbw_avg * 1.2: signals.append("🚀 **趨勢突破確立**：股價創高且布林通道開口放大。")
     
+    # MA
     if 'MA5' in df.columns and 'MA20' in df.columns:
         if last['MA5'] > last['MA20'] > last['MA60']: signals.append("🔥 **趨勢**：多頭排列")
-        elif last['MA5'] < last['MA20'] < last['MA60']: signals.append("❄️ **趨勢**：空頭排列")
         if prev['MA5'] < prev['MA20'] and last['MA5'] > last['MA20']: signals.append("✨ **均線金叉**：5日穿月線")
-        elif prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
+        if prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
         
+    # ADX & OBV
     if 'ADX' in df.columns and not pd.isna(last['ADX']):
         adx_val = last['ADX']
         if adx_val > 40: signals.append(f"🚀 **ADX極強 ({adx_val:.1f})**：趨勢爆發，動能最強。")
@@ -205,7 +229,7 @@ def analyze_signals(df):
         obv_trend = last['OBV'] > df['OBV'].iloc[-5:-1].mean()
         price_up = last['close'] > df['close'].iloc[-5:-1].mean()
         if obv_trend and price_up: signals.append("✅ **量價同步**：OBV上升，量能推動價格。")
-        elif not obv_trend and price_up: signals.append("❌ **量價背離**：價格上漲，但OBV下降，上漲動能不足。")
+        elif not obv_trend and price_up: signals.append("❌ **量價背離**：價格上漲但OBV下降，動能不足。")
         
     return signals if signals else ["⚖️ 盤整中"]
 
@@ -216,6 +240,7 @@ def generate_dual_strategy(df):
     score = calculate_score(df)
     vol_status = analyze_volume(df)
     
+    # 健檢清單
     checklist = {
         "站上月線 (MA20)": last_close > last['MA20'], 
         "季線多頭 (MA60向上)": last['MA20'] > last['MA60'],
@@ -224,40 +249,29 @@ def generate_dual_strategy(df):
         "RSI安全 (20~75)": 20 < last['RSI'] < 75
     }
     
-    strategy_base = {"title": "中性觀望", "icon": "⚖️", "color": "gray", "action": "觀望", "score": score, "vol": vol_status, "desc": "多空不明，等待訊號。"}
+    # 短線策略
+    short_term = {"title": "中性觀望", "icon": "⚖️", "color": "gray", "action": "觀望", "score": score, "vol": vol_status, "desc": "多空不明，等待訊號。"}
     sl_short = last['MA20'] if 'MA20' in df.columns else last_close * 0.9
     tp_short = last['BB_Up'] if 'BB_Up' in df.columns else last_close * 1.1
 
     if score >= 95:
-        strategy = strategy_base.copy()
-        strategy.update({"title": "🚀 趨勢噴發", "icon": "🚀", "color": "green", "action": "現價佈局", 
-                         "desc": "訊號極強，已脫離整理區間，建議現價或拉回 5日線佈局。",
-                         "entry_text": f"建議現價或回測 **{last['MA5']:.2f}** 佈局 (高風險高報酬)。"})
+        short_term.update({"title": "🚀 趨勢噴發", "icon": "🚀", "color": "green", "action": "現價佈局", 
+                         "desc": "訊號極強，已脫離整理區間。", "entry_text": f"建議現價或回測 **{last['MA5']:.2f}** 佈局。"})
     elif last_close > last['MA20'] and last['K'] < 80:
-        strategy = strategy_base.copy()
-        strategy.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", 
-                         "desc": "股價站上月線，短線強勢。",
-                         "entry_text": f"建議拉回測試 **{last['MA20']:.2f} (月線)** 不破時佈局。"})
-        
-        if last_close > last['close'].shift(1) and last['volume'] < last['VolMA5']:
-             strategy.update({"title": "📈 價漲量縮", "icon": "⚠️", "color": "orange", "action": "持股續抱，勿追高", 
-                              "desc": "多頭趨勢，但量能不足，追高有風險。",
-                              "entry_text": f"持股續抱，空手者等待回測 **{last['MA5']:.2f}** 觀察。"})
-        
+        short_term.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", 
+                         "desc": "股價站上月線，短線強勢。", "entry_text": f"建議拉回測試 **{last['MA20']:.2f}** 不破時佈局。"})
         if last['RSI'] > 75: 
-            strategy.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", 
-                             "desc": "雖為多頭但過熱，留意修正。",
-                             "entry_text": f"建議等待回測 **{last['MA5']:.2f}** 再觀察。"})
+            short_term.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", "desc": "雖為多頭但過熱，留意修正。"})
     elif last_close < last['MA20']:
-        strategy = strategy_base.copy()
-        strategy.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", 
-                         "desc": "跌破月線，短線轉弱。",
-                         "entry_text": "暫不建議進場，待站回月線。"})
+        short_term.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", 
+                         "desc": "跌破月線，短線轉弱。", "entry_text": "暫不建議進場，待站回月線。"})
         tp_short = last['MA20']
-    else:
-        strategy = strategy_base.copy()
-        strategy["entry_text"] = "暫不建議進場，等待明確訊號。"
+    
+    short_term["stop_loss"] = f"{sl_short:.2f}"
+    short_term["take_profit"] = f"{tp_short:.2f}"
+    short_term["checklist"] = checklist
 
+    # 長線策略
     long_term = {"title": "中性持有", "icon": "🐢", "color": "gray", "action": "續抱", "desc": "趨勢盤整"}
     sl_long = last['MA60'] if 'MA60' in df.columns else last_close * 0.85
     tp_long = df['high'].tail(120).max()
@@ -267,13 +281,8 @@ def generate_dual_strategy(df):
         long_term.update({"title": "長線轉弱", "icon": "❄️", "color": "red", "action": "保守應對", "desc": "跌破季線，需提防反轉。"})
         tp_long = last['MA60']
 
-    short_term = strategy
-    short_term["stop_loss"] = f"{sl_short:.2f}"
-    short_term["take_profit"] = f"{tp_short:.2f}"
-    short_term["checklist"] = checklist
     long_term["stop_loss"] = f"{sl_long:.2f}"
     long_term["take_profit"] = f"{tp_long:.2f}"
-    
     return short_term, long_term
 
 def calculate_fibonacci_multi(df):
@@ -286,30 +295,22 @@ def calculate_fibonacci_multi(df):
     return get_levels(20), get_levels(60), get_levels(240)
 
 # ==========================================
-# 5. 核心功能：財務數據 (穩健版)
+# 5. 核心功能：財務數據
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_financial_data(stock_code):
     metrics = {"PE": "N/A", "EPS": "N/A", "Yield": "N/A", "PB": "N/A"}
     chart_df = pd.DataFrame()
-    
-    # 嘗試 1: 使用 yfinance 抓取指標
     try:
         ticker = yf.Ticker(f"{stock_code}.TW")
         info = ticker.info
-        
-        # 檢查是否有資料，如果有則更新
         if info:
             if 'trailingPE' in info: metrics['PE'] = f"{info['trailingPE']:.2f}"
             if 'trailingEps' in info: metrics['EPS'] = f"{info['trailingEps']:.2f}"
             if 'dividendYield' in info and info['dividendYield']: metrics['Yield'] = f"{info['dividendYield']*100:.2f}%"
             if 'priceToBook' in info: metrics['PB'] = f"{info['priceToBook']:.2f}"
-    except:
-        # 如果 yfinance 失敗，可以考慮要在這裡加入備用爬蟲，或直接顯示 N/A
-        # 為了穩定，目前先保持 N/A，但提供下方連結讓使用者查詢
-        pass
+    except: pass
 
-    # 嘗試 2: 使用 yfinance 抓取財報圖表
     try:
         fin_stmt = ticker.quarterly_income_stmt.T
         if not fin_stmt.empty:
@@ -320,9 +321,7 @@ def get_financial_data(stock_code):
                 chart_df['Revenue'] = recent[rev_col[0]]
                 chart_df['Net Income'] = recent[inc_col[0]]
                 chart_df.index = chart_df.index.strftime('%Y-Q%q') 
-    except:
-        pass
-        
+    except: pass
     return metrics, chart_df
 
 # ==========================================
@@ -358,7 +357,6 @@ with col2:
 if not df.empty:
     df = calculate_indicators(df)
     
-    # 最終分頁配置
     tab1, tab2, tab3, tab4 = st.tabs(["📊 K線圖", "💡 訊號診斷", "📐 黃金分割", "💰 營收與獲利"]) 
 
     with tab1:
@@ -469,14 +467,10 @@ if not df.empty:
             st.markdown("#### 🐢 長線 (240日)")
             if l_fib: st.table(pd.DataFrame([{"位置":k, "價格":f"{v:.2f}"} for k,v in l_fib.items()]))
 
-    # Tab 4: 營收與獲利 (容錯版)
     with tab4:
         st.subheader(f"💰 {name} ({stock_code}) 營收與獲利概況")
-        
-        # 抓取資料 (若失敗則回傳空值)
         metrics, fin_df = get_financial_data(stock_code)
         
-        # 1. 顯示關鍵指標 (若抓不到則顯示 N/A，不報錯)
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("本益比 (PE)", metrics['PE'])
         m2.metric("每股盈餘 (EPS)", metrics['EPS'])
@@ -484,18 +478,13 @@ if not df.empty:
         m4.metric("股價淨值比 (PB)", metrics['PB'])
         
         st.divider()
-        
-        # 2. 顯示圖表 (若有數據才畫圖)
         if not fin_df.empty:
             st.markdown("#### 📊 近五季營收趨勢 (單位：元)")
             st.bar_chart(fin_df['Revenue'])
-            
             st.markdown("#### 💵 近五季稅後淨利 (單位：元)")
             st.bar_chart(fin_df['Net Income'])
         else:
-            # 若 yfinance 沒資料，顯示提示並提供連結
             st.warning("⚠️ 暫時無法獲取圖表數據 (可能是資料源連線問題或 ETF)。")
-            st.markdown("建議您透過下方連結查看完整財報：")
             
         st.divider()
         st.markdown("#### 🔗 詳細財報連結")
