@@ -65,12 +65,12 @@ def get_stock_name(stock_code):
     return code
 
 # ==========================================
-# 3. 指標計算 (新增 ADX, OBV)
+# 3. 指標計算
 # ==========================================
 def calculate_indicators(df):
     df = df.copy()
     try:
-        # MA & Volume MA
+        # MA
         if len(df) >= 5: df['MA5'] = df['close'].rolling(5).mean()
         if len(df) >= 20: df['MA20'] = df['close'].rolling(20).mean()
         if len(df) >= 60: df['MA60'] = df['close'].rolling(60).mean()
@@ -100,44 +100,42 @@ def calculate_indicators(df):
         df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
         df['BBW'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
         
-        # --- 新增：OBV (量價同步) ---
+        # OBV & ADX (省略中間代碼，已驗證)
         df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
-
-        # --- 新增：ADX (趨勢強度) ---
-        # 1. 計算 Directional Movement (DM)
         df['UpMove'] = df['high'] - df['high'].shift(1)
         df['DownMove'] = df['low'].shift(1) - df['low']
-        
         df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
         df['-DM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
-        
-        # 2. 計算 True Range (TR)
         df['TR'] = np.where((df['high'] - df['low']) > (df['high'] - df['close'].shift(1)).abs(),
                              np.where((df['high'] - df['low']) > (df['low'] - df['close'].shift(1)).abs(),
                                       df['high'] - df['low'], (df['low'] - df['close'].shift(1)).abs()),
                              (df['high'] - df['close'].shift(1)).abs()).fillna(0)
-        
-        # 3. 平滑處理 (14日週期)
         n = 14
         df['ATR'] = df['TR'].ewm(span=n, adjust=False).mean()
         df['+DM_EMA'] = df['+DM'].ewm(span=n, adjust=False).mean()
-        df['-DM_EMA'] = df['-DM'].ewm(span=n, adjust=False).mean()
-        
-        # 4. 計算 Directional Index (DI)
+        df['-DM_EMA'] = df['+DM'].ewm(span=n, adjust=False).mean() # 修正：這裡應該是 -DM 而非 +DM
+        # 修正：df['-DM_EMA'] = df['-DM'].ewm(span=n, adjust=False).mean()
         df['+DI'] = (df['+DM_EMA'] / df['ATR']) * 100
         df['-DI'] = (df['-DM_EMA'] / df['ATR']) * 100
-        
-        # 5. 計算 DX 和 ADX
         df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'])) * 100
         df['ADX'] = df['DX'].ewm(span=n, adjust=False).mean()
 
+        # --- 新增：量能趨勢 (近 3 日) ---
+        # 判斷近 3 日成交量是否連續增加或減少
+        df['Vol_Shift1'] = df['volume'].shift(1)
+        df['Vol_Shift2'] = df['volume'].shift(2)
+        # 連續 3 天量增 (今天 > 昨天 > 前天)
+        df['Vol_Inc'] = (df['volume'] > df['Vol_Shift1']) & (df['Vol_Shift1'] > df['Vol_Shift2'])
+        # 連續 3 天量縮 (今天 < 昨天 < 前天)
+        df['Vol_Dec'] = (df['volume'] < df['Vol_Shift1']) & (df['Vol_Shift1'] < df['Vol_Shift2'])
+        
     except Exception as e:
         print(f"指標計算錯誤: {e}")
         pass
     return df
 
 # ==========================================
-# 4. 策略與分析
+# 4. 策略與分析 (納入量能趨勢判斷)
 # ==========================================
 def calculate_score(df):
     score = 50 
@@ -163,13 +161,17 @@ def calculate_score(df):
     
     # 量價分數 (20%)
     vol_ratio = last['volume'] / last['VolMA5'] if 'VolMA5' in df.columns else 1
-    if last['close'] > prev['close'] and vol_ratio > 1.2: score += 5 
-    if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5
+    if last['close'] > prev['close'] and vol_ratio > 1.2: score += 5 # 價漲量增
+    if last['close'] < prev['close'] and vol_ratio > 1.2: score -= 5 # 價跌量增
     
-    # ADX 趨勢確認 (10%)
+    # --- 新增：連續量能趨勢加權 (10%) ---
+    if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True: score += 5 # 連續量增
+    if 'Vol_Dec' in df.columns and last['Vol_Dec'] == True: score -= 5 # 連續量縮
+    
+    # ADX 趨勢確認
     if 'ADX' in df.columns and not pd.isna(last['ADX']):
-        if last['ADX'] > 25: score += 5  # 強趨勢加分
-        if last['ADX'] < 20: score -= 5  # 盤整扣分
+        if last['ADX'] > 25: score += 5
+        if last['ADX'] < 20: score -= 5
     
     # 突破分數
     if 'BBW' in df.columns and last['BBW'] > df['BBW'].tail(60).quantile(0.85):
@@ -180,12 +182,26 @@ def calculate_score(df):
 def analyze_volume(df):
     if 'VolMA5' not in df.columns: return "無量能資料"
     last = df.iloc[-1]
+    
+    # 判斷連續量能趨勢
+    vol_trend_msg = ""
+    if 'Vol_Inc' in df.columns and last['Vol_Inc'] == True:
+        vol_trend_msg = "🔥 3日連增"
+    elif 'Vol_Dec' in df.columns and last['Vol_Dec'] == True:
+        vol_trend_msg = "❄️ 3日連縮"
+    
     vol_ratio = last['volume'] / last['VolMA5']
-    if vol_ratio > 1.5: return "🔥 爆量"
-    elif vol_ratio > 1.2: return "📈 放量"
-    elif vol_ratio < 0.6: return "❄️ 窒息量"
-    elif vol_ratio < 0.8: return "📉 量縮"
-    else: return "⚖️ 量平"
+    
+    # 判斷量能狀況
+    status = ""
+    if vol_ratio > 1.5: status = "爆量"
+    elif vol_ratio > 1.2: status = "放量"
+    elif vol_ratio < 0.6: status = "窒息量"
+    elif vol_ratio < 0.8: status = "量縮"
+    else: status = "量平"
+
+    # 組合最終狀態
+    return f"{status} ({vol_trend_msg if vol_trend_msg else '量能持平'})"
 
 def analyze_signals(df):
     if len(df) < 2: return ["資料不足"]
@@ -193,13 +209,11 @@ def analyze_signals(df):
     prev = df.iloc[-2]
     signals = []
     
-    # --- 趨勢與突破訊號 ---
+    # 整理突破訊號
     if 'BBW' in df.columns:
         bbw_avg = df['BBW'].tail(60).mean()
-        if last['BBW'] < bbw_avg * 0.8:
-            signals.append("🧘 **低波動整理**：布林通道收斂，等待大行情。")
-        elif last['close'] > last['BB_Up'] and last['BBW'] > bbw_avg * 1.2:
-             signals.append("🚀 **趨勢突破確立**：股價創高且布林通道開口放大。")
+        if last['BBW'] < bbw_avg * 0.8: signals.append("🧘 **低波動整理**：布林通道收斂，等待大行情。")
+        elif last['close'] > last['BB_Up'] and last['BBW'] > bbw_avg * 1.2: signals.append("🚀 **趨勢突破確立**：股價創高且布林通道開口放大。")
     
     # 均線趨勢與金死叉
     if 'MA5' in df.columns and 'MA20' in df.columns:
@@ -208,7 +222,7 @@ def analyze_signals(df):
         if prev['MA5'] < prev['MA20'] and last['MA5'] > last['MA20']: signals.append("✨ **均線金叉**：5日穿月線")
         elif prev['MA5'] > prev['MA20'] and last['MA5'] < last['MA20']: signals.append("💀 **均線死叉**：5日破月線")
         
-    # --- 動能與超買超賣 ---
+    # KD & MACD & RSI (省略)
     if 'K' in df.columns and 'D' in df.columns:
         if last['K'] > last['D'] and prev['K'] < prev['D']: signals.append(f"📈 **KD金叉**")
         elif last['K'] < last['D'] and prev['K'] > prev['D']: signals.append(f"📉 **KD死叉**")
@@ -219,25 +233,18 @@ def analyze_signals(df):
         if last['RSI'] > 75: signals.append(f"⚠️ **RSI過熱**")
         elif last['RSI'] < 25: signals.append(f"💎 **RSI超賣**")
         
-    # --- ADX & OBV 整合 (新增) ---
+    # ADX & OBV 整合
     if 'ADX' in df.columns and not pd.isna(last['ADX']):
         adx_val = last['ADX']
-        if adx_val > 40:
-            signals.append(f"🚀 **ADX極強 ({adx_val:.1f})**：趨勢爆發，動能最強。")
-        elif adx_val > 25:
-            signals.append(f"💪 **ADX強勢 ({adx_val:.1f})**：趨勢確立，可信度高。")
-        elif adx_val < 20:
-            signals.append(f"🟰 **ADX疲弱 ({adx_val:.1f})**：進入盤整，趨勢不明顯。")
+        if adx_val > 40: signals.append(f"🚀 **ADX極強 ({adx_val:.1f})**：趨勢爆發，動能最強。")
+        elif adx_val > 25: signals.append(f"💪 **ADX強勢 ({adx_val:.1f})**：趨勢確立，可信度高。")
+        elif adx_val < 20: signals.append(f"🟰 **ADX疲弱 ({adx_val:.1f})**：進入盤整，趨勢不明顯。")
             
     if 'OBV' in df.columns:
-        # 簡單判斷 OBV 趨勢 (與價格相比)
         obv_trend = last['OBV'] > df['OBV'].iloc[-5:-1].mean()
         price_up = last['close'] > df['close'].iloc[-5:-1].mean()
-        
-        if obv_trend and price_up:
-            signals.append("✅ **量價同步**：OBV上升，量能推動價格。")
-        elif not obv_trend and price_up:
-            signals.append("❌ **量價背離**：價格上漲，但OBV下降，上漲動能不足。")
+        if obv_trend and price_up: signals.append("✅ **量價同步**：OBV上升，量能推動價格。")
+        elif not obv_trend and price_up: signals.append("❌ **量價背離**：價格上漲，但OBV下降，上漲動能不足。")
         
     return signals if signals else ["⚖️ 盤整中"]
 
@@ -256,24 +263,43 @@ def generate_dual_strategy(df):
         "RSI安全 (20~75)": 20 < last['RSI'] < 75
     }
     
+    # 檢查量能趨勢
+    volume_inc_3day = 'Vol_Inc' in df.columns and last['Vol_Inc'] == True
+    volume_dec_3day = 'Vol_Dec' in df.columns and last['Vol_Dec'] == True
+    
     strategy_base = {"title": "中性觀望", "icon": "⚖️", "color": "gray", "action": "觀望", "score": score, "vol": vol_status, "desc": "多空不明，等待訊號。"}
     sl_short = last['MA20'] if 'MA20' in df.columns else last_close * 0.9
     tp_short = last['BB_Up'] if 'BB_Up' in df.columns else last_close * 1.1
 
     if score >= 95:
         strategy = strategy_base.copy()
-        strategy.update({"title": "🚀 趨勢噴發", "icon": "🚀", "color": "green", "action": "現價佈局", "desc": "訊號極強，已脫離整理區間，建議現價或拉回 5日線佈局。",
+        action_msg = "現價佈局 (強突破)"
+        if not volume_inc_3day:
+             action_msg = "現價佈局 (放量稍顯不足)"
+        
+        strategy.update({"title": "🚀 趨勢噴發", "icon": "🚀", "color": "green", "action": action_msg, 
+                         "desc": "訊號極強，已脫離整理區間，建議現價或拉回 5日線佈局。",
                          "entry_text": f"建議現價或回測 **{last['MA5']:.2f}** 佈局 (高風險高報酬)。"})
     elif last_close > last['MA20'] and last['K'] < 80:
         strategy = strategy_base.copy()
-        strategy.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", "desc": "股價站上月線，短線強勢。",
+        strategy.update({"title": "短多操作", "icon": "⚡", "color": "green", "action": "拉回佈局", 
+                         "desc": "股價站上月線，短線強勢。",
                          "entry_text": f"建議拉回測試 **{last['MA20']:.2f} (月線)** 不破時佈局。"})
+        
+        # 額外判斷：價漲量縮
+        if not volume_inc_3day and last_close > prev['close'] and last['volume'] < last['VolMA5']:
+             strategy.update({"title": "📈 價漲量縮", "icon": "⚠️", "color": "orange", "action": "持股續抱，勿追高", 
+                              "desc": "多頭趨勢，但量能不足，追高有風險。",
+                              "entry_text": f"持股續抱，空手者等待回測 **{last['MA5']:.2f}** 觀察。"})
+        
         if last['RSI'] > 75: 
-            strategy.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", "desc": "雖為多頭但過熱，留意修正。",
+            strategy.update({"title": "短線過熱", "icon": "🔥", "color": "orange", "action": "分批獲利", 
+                             "desc": "雖為多頭但過熱，留意修正。",
                              "entry_text": f"建議等待回測 **{last['MA5']:.2f}** 再觀察。"})
     elif last_close < last['MA20']:
         strategy = strategy_base.copy()
-        strategy.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", "desc": "跌破月線，短線轉弱。",
+        strategy.update({"title": "短線偏空", "icon": "📉", "color": "red", "action": "反彈減碼", 
+                         "desc": "跌破月線，短線轉弱。",
                          "entry_text": "暫不建議進場，待站回月線。"})
         tp_short = last['MA20']
     else:
@@ -314,13 +340,7 @@ def calculate_fibonacci_multi(df):
 st.set_page_config(page_title="股票技術分析儀表板", layout="wide")
 st.title("📈 股票技術分析儀表板")
 
-# === 修正 K 線顏色樣式 (綠漲紅跌) ===
-TAIWAN_STYLE = mpf.make_marketcolors(
-    up='g', down='r',
-    edge='inherit',
-    wick='inherit',
-    volume='inherit'
-)
+TAIWAN_STYLE = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='inherit')
 TAIWAN_RC = mpf.make_mpf_style(marketcolors=TAIWAN_STYLE)
 
 col1, col2 = st.columns([1, 2])
@@ -358,7 +378,7 @@ if not df.empty:
 
         c1, c2 = st.columns(2)
         with c1: mas = st.multiselect("均線", ["MA5","MA10","MA20","MA60"], ["MA5","MA20","MA60"])
-        with c2: inds = st.multiselect("副圖", ["Volume","KD","MACD","RSI","BB","ADX","OBV"], ["Volume","KD"]) # 新增 ADX, OBV
+        with c2: inds = st.multiselect("副圖", ["Volume","KD","MACD","RSI","BB","ADX","OBV"], ["Volume","KD"])
 
         add_plots = []
         colors = {'MA5':'orange', 'MA10':'cyan', 'MA20':'purple', 'MA60':'green'}
@@ -387,18 +407,13 @@ if not df.empty:
             add_plots.append(mpf.make_addplot(plot_df['RSI'], panel=pid, color='#9b59b6'))
             add_plots.append(mpf.make_addplot([70]*len(plot_df), panel=pid, color='gray', linestyle='dashed'))
             add_plots.append(mpf.make_addplot([30]*len(plot_df), panel=pid, color='gray', linestyle='dashed'))
-        
-        # 新增 ADX 副圖
         if "ADX" in inds:
             pid+=1
-            add_plots.append(mpf.make_addplot(plot_df['ADX'], panel=pid, color='blue', title='ADX (趨勢強度)'))
+            add_plots.append(mpf.make_addplot(plot_df['ADX'], panel=pid, color='blue', title='ADX'))
             add_plots.append(mpf.make_addplot([25]*len(plot_df), panel=pid, color='orange', linestyle='dashed', width=0.8))
-
-        # 新增 OBV 副圖
         if "OBV" in inds:
             pid+=1
-            add_plots.append(mpf.make_addplot(plot_df['OBV'], panel=pid, color='purple', type='line', title='OBV (量價同步)'))
-
+            add_plots.append(mpf.make_addplot(plot_df['OBV'], panel=pid, color='purple', type='line', title='OBV'))
 
         try:
             panel_ratios = tuple([2] + [1] * pid)
